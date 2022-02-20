@@ -150,6 +150,7 @@ import {
 	sendStatistics,
 } from "../telemetry/statistics";
 import { createMessageGenerator } from "./MessageGenerators";
+import { migrateLegacyNetworkCache } from "./NetworkCache";
 import {
 	createSendThreadMachine,
 	SendThreadInterpreter,
@@ -641,6 +642,11 @@ export class Driver extends TypedEventEmitter<DriverEventCallbacks> {
 	public get metadataDB(): JsonlDB<ValueMetadata> | undefined {
 		return this._metadataDB;
 	}
+	private _networkCache: JsonlDB | undefined;
+	/** @internal */
+	public get networkCache(): JsonlDB | undefined {
+		return this._networkCache;
+	}
 
 	public readonly configManager: ConfigManager;
 	public get configVersion(): string {
@@ -919,14 +925,22 @@ export class Driver extends TypedEventEmitter<DriverEventCallbacks> {
 	}
 
 	private async initValueDBs(homeId: number): Promise<void> {
-		// Always start the value and metadata databases
 		const options: JsonlDBOptions<any> = {
 			ignoreReadErrors: true,
 			...throttlePresets[this.options.storage.throttle],
 		};
 		if (this.options.storage.lockDir) {
-			options.lockfileDirectory = this.options.storage.lockDir;
+			options.lockfile = {
+				directory: this.options.storage.lockDir,
+			};
 		}
+
+		const networkCacheFile = path.join(
+			this.cacheDir,
+			`${homeId.toString(16)}.jsonl`,
+		);
+		this._networkCache = new JsonlDB(networkCacheFile, options);
+		await this._networkCache.open();
 
 		const valueDBFile = path.join(
 			this.cacheDir,
@@ -947,8 +961,9 @@ export class Driver extends TypedEventEmitter<DriverEventCallbacks> {
 		await this._metadataDB.open();
 
 		if (process.env.NO_CACHE === "true") {
-			// Since value/metadata DBs are append-only, we need to clear them
-			// if the cache should be ignored
+			// Since cache and value/metadata DBs are append-only, we need to
+			// clear them if the cache should be ignored
+			this._networkCache.clear();
 			this._valueDB.clear();
 			this._metadataDB.clear();
 		}
@@ -3933,13 +3948,35 @@ ${handlers.length} left`,
 	 * Restores a previously stored Z-Wave network state from cache to speed up the startup process
 	 */
 	public async restoreNetworkStructureFromCache(): Promise<void> {
-		if (!this._controller || !this.controller.homeId) return;
+		if (!this._controller || !this.controller.homeId || !this._networkCache)
+			return;
 
-		const cacheFile = path.join(
-			this.cacheDir,
-			`${this.controller.homeId.toString(16)}.json`,
-		);
-		if (!(await this.options.storage.driver.pathExists(cacheFile))) return;
+		// In v9, the network cache was switched from a json file to use a Jsonl-DB
+		// Therefore the legacy cache file must be migrated to the new format
+		if (this._networkCache.size === 0) {
+			// version the cache format, so migrations in the future are easier
+			this._networkCache.set("cacheFormat", 1);
+
+			try {
+				await migrateLegacyNetworkCache(
+					this.controller.homeId,
+					this._networkCache,
+					this.options.storage.driver,
+					this.cacheDir,
+				);
+			} catch (e) {
+				const message = `Migrating the legacy cache file to jsonl failed: ${getErrorMessage(
+					e,
+					true,
+				)}`;
+				this.driverLog.print(message, "error");
+			}
+		}
+
+		if (this._networkCache.size <= 1) {
+			// If the size is 0 or 1, the cache is empty, so we cannot restore it
+			return;
+		}
 
 		try {
 			this.driverLog.print(
@@ -3947,11 +3984,7 @@ ${handlers.length} left`,
 					this.controller.homeId,
 				)} found, attempting to restore the network from cache...`,
 			);
-			const cacheString = await this.options.storage.driver.readFile(
-				cacheFile,
-				"utf8",
-			);
-			await this.controller.deserialize(JSON.parse(cacheString));
+			await this.controller.deserialize();
 			this.driverLog.print(
 				`Restoring the network from cache was successful!`,
 			);

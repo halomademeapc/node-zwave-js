@@ -27,3 +27,12 @@ While working on the SmartStart feature it was noticed that some properties and 
 ## Converted the `isControllerNode` method on the `ZWaveNode` class to a readonly property
 
 While there is no hard style guide governing this, we tend to use readonly properties for static things like a node's IDs and methods for (potentially) dynamic things like endpoint counts. Since the controller node ID doesn't change during usage, this feels more "correct".
+
+## Migrated the `<homeid>.json` network cache file to `<homeid>.jsonl`
+
+Many centuries (or maybe months) ago, the the value and metadata DBs were migrated to append-only `.jsonl` files, which are resistant against data loss during crashes. However the main network cache file was still a `.json` file, which could lead to the driver "forgetting" the security status of devices.
+
+In version 9, the network cache is now also a `.jsonl` file. This has several implications:
+
+1. If you're backing up the network cache files, make sure to backup the `.jsonl` files. The network cache is automatically migrated from `.json` to `.jsonl` when the driver starts up, so make sure to still have the `.json` file for the first startup after upgrading.
+2. Support for legacy versions of the `.json` cache file from before `v8.1.0` has been removed. When upgrading from older versions, the upgrade must be done in two steps. First upgrade to the latest available `8.x` version, then upgrade to v9.
